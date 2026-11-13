@@ -22,6 +22,9 @@
       <span v-for="item in statusSummary" :key="item.status" class="legend-item">
         {{ item.status }}：{{ item.count }}
       </span>
+      <label class="legend-item">
+        <input v-model="includeArchived" type="checkbox" @change="reload" /> 显示已归档
+      </label>
     </p>
 
     <form class="filter-bar" @submit.prevent="reload">
@@ -43,11 +46,14 @@
       </thead>
       <tbody>
         <tr v-for="row in rows" :key="String(row.id)">
-          <td v-for="column in columns" :key="column">{{ row[column] ?? '—' }}</td>
+          <td v-for="(column, colIndex) in columns" :key="column">
+            <RouterLink v-if="colIndex === 0" class="link" :to="`/${meta.key}/${row.id}`">{{ row[column] ?? '—' }}</RouterLink>
+            <template v-else>{{ row[column] ?? '—' }}</template>
+          </td>
           <td>{{ row.status }}</td>
           <td class="row-actions">
             <button
-              v-for="action in actions"
+              v-for="action in allowedActions(row)"
               :key="action"
               class="link"
               type="button"
@@ -55,6 +61,7 @@
             >
               {{ action }}
             </button>
+            <span v-if="!allowedActions(row).length" class="cell-sub">当前阶段无可执行动作</span>
           </td>
         </tr>
         <tr v-if="!rows.length">
@@ -88,6 +95,16 @@ const statuses = ["草稿", "待审核", "已启用", "已停用"]
 const stats = [{"label": "明细表总数", "value": 0}, {"label": "已启用表", "value": 0}, {"label": "待审核表", "value": 0}]
 
 const rows = ref<EntryRow[]>([])
+const includeArchived = ref(false)
+
+/** 生命周期按阶段变更：只放出对象当前状态下合法的动作。 */
+function allowedActions(row: EntryRow): string[] {
+  const current = String(row.status)
+  return actions.filter((action: string) => {
+    const allowed = meta.transitions?.[action]
+    return !allowed || allowed.includes(current)
+  })
+}
 const total = ref(0)
 const errorMessage = ref('')
 const filters = ref<Record<string, string>>({})
@@ -125,7 +142,7 @@ function runAction(action: string, row: EntryRow) {
 function reload() {
   errorMessage.value = ''
   try {
-    const payload = listEntries(meta.key, filters.value)
+    const payload = listEntries(meta.key, filters.value, includeArchived.value)
     rows.value = payload.items
     total.value = payload.total
   } catch (error) {

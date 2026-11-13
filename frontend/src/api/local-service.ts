@@ -1,9 +1,12 @@
 import { MODULE_BY_KEY } from '@/data/modules'
 import { allRows, listRows, resetRows, saveRows } from '@/data/local-store'
+import { resetOrchestration } from '@/data/orchestration'
 import type { ActionResult, EntryRow, ModuleMeta, OverviewResult, PageResult } from '@/data/types'
 
 // 会写进数据的「往回走」动作：命中就把这条记录标成异常态，看板上能一眼看出来。
 const NEGATIVE_ACTIONS = ['撤销', '作废', '拒绝', '驳回', '停用', '忽略', '下线', '回滚']
+// 归档态：列表默认不展示旧对象，避免「列表页残留旧对象」。
+const ARCHIVE_STATUS = '已归档'
 
 export function moduleMeta(key: string): ModuleMeta {
   const meta = MODULE_BY_KEY.get(key)
@@ -23,9 +26,21 @@ export function filterRows(rows: EntryRow[], filters: Record<string, string>): E
   )
 }
 
-export function listEntries(key: string, filters: Record<string, string> = {}): PageResult {
-  const matched = filterRows(listRows(key), filters)
+export function listEntries(
+  key: string,
+  filters: Record<string, string> = {},
+  includeArchived = false,
+): PageResult {
+  const source = listRows(key)
+  // 列表页默认剔除归档对象；勾选「显示已归档」才带出来，旧对象不再残留干扰在岗数据。
+  const visible = includeArchived ? source : source.filter((row) => String(row.status) !== ARCHIVE_STATUS)
+  const matched = filterRows(visible, filters)
   return { items: matched, total: matched.length, page: 1, size: matched.length }
+}
+
+/** 详情读取：永远直接从主存储按 id 取当前值，列表缓存不参与，确保进详情看到的值就是真实值。 */
+export function getEntry(key: string, id: number): EntryRow | undefined {
+  return listRows(key).find((row) => Number(row.id) === Number(id))
 }
 
 export function runAction(key: string, id: number, action: string): ActionResult {
@@ -43,6 +58,15 @@ export function runAction(key: string, id: number, action: string): ActionResult
   if (current === target) {
     return { ok: false, message: `${meta.entity}已经是「${target}」，不用重复操作` }
   }
+  // 生命周期按阶段变更：登记了 transitions 的动作必须从合法当前阶段发起，
+  // 归档/恢复因此与对象当前状态绑定，不能跨阶段乱跳。
+  const allowed = meta.transitions?.[action]
+  if (allowed && !allowed.includes(current)) {
+    return {
+      ok: false,
+      message: `${meta.entity}当前处于「${current}」，不能发起「${action}」（该动作仅允许：${allowed.join('、')}）`,
+    }
+  }
   const lastStatus = meta.statuses[meta.statuses.length - 1]
   const updated: EntryRow = {
     ...rows[index],
@@ -57,7 +81,12 @@ export function runAction(key: string, id: number, action: string): ActionResult
 }
 
 export function resetModule(key: string): PageResult {
-  resetRows(key)
+  if (key === 'transform') {
+    // 转换编排的清单与封印链运行态要一起复位，否则两边会对不上。
+    resetOrchestration()
+  } else {
+    resetRows(key)
+  }
   return listEntries(key)
 }
 
@@ -68,7 +97,7 @@ export function exportEntries(key: string): { filename: string; content: string 
   for (const row of listRows(key)) {
     lines.push([row.id, ...meta.fields.map((field) => row[field] ?? ''), row.status].join(','))
   }
-  return { filename: `${meta.name}-清单.csv`, content: `\uFEFF${lines.join('\n')}` }
+  return { filename: `${meta.name}-清单.csv`, content: `﻿${lines.join('\n')}` }
 }
 
 export function downloadEntries(key: string): void {
@@ -88,11 +117,13 @@ export function loadOverview(): OverviewResult {
   const rows = allRows()
   const modules = [...MODULE_BY_KEY.values()].map((meta) => {
     const entries = rows[meta.key] ?? []
+    // 归档对象不再计入在岗总量与待处理，概览与列表口径保持一致。
+    const active = entries.filter((row) => String(row.status) !== ARCHIVE_STATUS)
     return {
       name: meta.name,
-      created: entries.length,
-      pending: entries.filter((row) => row.pending).length,
-      abnormal: entries.filter((row) => row.abnormal).length,
+      created: active.length,
+      pending: active.filter((row) => row.pending).length,
+      abnormal: active.filter((row) => row.abnormal).length,
     }
   })
   const cards = [

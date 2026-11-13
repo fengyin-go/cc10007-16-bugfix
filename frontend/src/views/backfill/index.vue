@@ -22,6 +22,9 @@
       <span v-for="item in statusSummary" :key="item.status" class="legend-item">
         {{ item.status }}：{{ item.count }}
       </span>
+      <label class="legend-item">
+        <input v-model="includeArchived" type="checkbox" @change="reload" /> 显示已归档
+      </label>
     </p>
 
     <form class="filter-bar" @submit.prevent="reload">
@@ -43,11 +46,14 @@
       </thead>
       <tbody>
         <tr v-for="row in rows" :key="String(row.id)">
-          <td v-for="column in columns" :key="column">{{ row[column] ?? '—' }}</td>
+          <td v-for="(column, colIndex) in columns" :key="column">
+            <RouterLink v-if="colIndex === 0" class="link" :to="`/${meta.key}/${row.id}`">{{ row[column] ?? '—' }}</RouterLink>
+            <template v-else>{{ row[column] ?? '—' }}</template>
+          </td>
           <td>{{ row.status }}</td>
           <td class="row-actions">
             <button
-              v-for="action in actions"
+              v-for="action in allowedActions(row)"
               :key="action"
               class="link"
               type="button"
@@ -55,6 +61,7 @@
             >
               {{ action }}
             </button>
+            <span v-if="!allowedActions(row).length" class="cell-sub">当前阶段无可执行动作</span>
           </td>
         </tr>
         <tr v-if="!rows.length">
@@ -83,11 +90,21 @@ import type { EntryRow } from '@/data/types'
 
 const meta = moduleMeta('backfill')
 const columns = ["任务编号", "目标表名", "开始日期", "结束日期", "并行度", "覆盖策略", "完成水位", "失败区间"]
-const actions = ["提交执行", "启动任务", "终止任务", "归档结果"]
+const actions = ["提交执行", "启动任务", "终止任务", "归档结果", "恢复任务"]
 const statuses = ["草稿", "待执行", "运行中", "已完成", "已失败"]
 const stats = [{"label": "补数任务总数", "value": 0}, {"label": "运行中任务", "value": 0}, {"label": "已完成任务", "value": 0}]
 
 const rows = ref<EntryRow[]>([])
+const includeArchived = ref(false)
+
+/** 生命周期按阶段变更：只放出对象当前状态下合法的动作。 */
+function allowedActions(row: EntryRow): string[] {
+  const current = String(row.status)
+  return actions.filter((action: string) => {
+    const allowed = meta.transitions?.[action]
+    return !allowed || allowed.includes(current)
+  })
+}
 const total = ref(0)
 const errorMessage = ref('')
 const filters = ref<Record<string, string>>({})
@@ -125,7 +142,7 @@ function runAction(action: string, row: EntryRow) {
 function reload() {
   errorMessage.value = ''
   try {
-    const payload = listEntries(meta.key, filters.value)
+    const payload = listEntries(meta.key, filters.value, includeArchived.value)
     rows.value = payload.items
     total.value = payload.total
   } catch (error) {
